@@ -6,7 +6,7 @@ import json
 import re
 from typing import Mapping
 
-from .geometry import LETTERS, NUM_QUESTIONS
+from .geometry import LETTERS, MAX_QUESTIONS
 
 DEFAULT_KEY: dict[int, str] = {
     1: "A", 2: "C", 3: "C", 4: "C", 5: "C",
@@ -25,12 +25,15 @@ _LINE_RE = re.compile(
 _PAIR_RE = re.compile(r"(\d{1,3})\s*([A-Da-d])")
 
 
-def parse_marking_scheme(text: str, expect_n: int = NUM_QUESTIONS) -> dict[int, str]:
+def parse_marking_scheme(text: str) -> dict[int, str]:
     """
     Accept:
-      - JSON object {"1":"A","2":"C",...} or {"1":"A",...} with int-like keys
+      - JSON object {"1":"A","2":"C",...} or list forms
       - lines like `1:A` / `1 = A` / `Q1 A`
       - compact tokens `1A 2C 3C ...`
+
+    Question count = number of Q→answer pairs provided (any length 1–MAX_QUESTIONS).
+    Keys must be contiguous from 1..N (no gaps).
     """
     raw = (text or "").strip()
     if not raw:
@@ -41,7 +44,6 @@ def parse_marking_scheme(text: str, expect_n: int = NUM_QUESTIONS) -> dict[int, 
     if raw.startswith("{") or raw.startswith("["):
         data = json.loads(raw)
         if isinstance(data, list):
-            # [{"q":1,"answer":"A"}] or ["A","C",...]
             if data and isinstance(data[0], dict):
                 for item in data:
                     q = int(item.get("q") or item.get("question"))
@@ -72,19 +74,24 @@ def parse_marking_scheme(text: str, expect_n: int = NUM_QUESTIONS) -> dict[int, 
 
     cleaned: dict[int, str] = {}
     for q, a in sorted(key.items()):
+        if not 1 <= q <= MAX_QUESTIONS:
+            raise ValueError(
+                f"Q{q} out of range (sheet layout supports Q1–Q{MAX_QUESTIONS})"
+            )
         if a not in LETTERS:
             raise ValueError(f"invalid answer for Q{q}: {a!r} (want A–D)")
-        if not 1 <= q <= expect_n:
-            # allow extra keys but ignore beyond expect_n for v1
-            if q > expect_n:
-                continue
         cleaned[q] = a
 
-    missing = [q for q in range(1, expect_n + 1) if q not in cleaned]
+    n = max(cleaned)
+    missing = [q for q in range(1, n + 1) if q not in cleaned]
     if missing:
         raise ValueError(
-            f"marking scheme missing {len(missing)} question(s): "
+            f"marking scheme missing {len(missing)} question(s) between 1 and {n}: "
             + ", ".join(f"Q{q}" for q in missing[:12])
             + ("…" if len(missing) > 12 else "")
         )
     return cleaned
+
+
+def question_count(key: dict[int, str]) -> int:
+    return max(key) if key else 0

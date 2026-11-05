@@ -99,9 +99,10 @@ def mark_pdf(
     result = MarkingResult(job_dir=job_dir)
     page_records: list[dict[str, Any]] = []
 
+    questions = sorted(key.keys())
     for idx, png in enumerate(page_pngs, start=1):
         im = Image.open(png)
-        reads = read_answers(im, geo)
+        reads = read_answers(im, geo, questions=questions)
         scored = score_page(reads, key)
         scored["page"] = idx
         page_records.append(scored)

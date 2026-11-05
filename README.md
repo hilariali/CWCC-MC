@@ -1,6 +1,6 @@
 # MC Exam Marking (v1)
 
-Python-only web app that marks **CWCCC-style** multiple-choice answer sheets (Q1–40, A–D bubbles). No LLM.
+Python-only web app that marks **CWCCC-style** multiple-choice answer sheets (A–D bubbles). Question count follows the marking scheme you paste (contiguous Q1…N, up to **50** on the calibrated sheet layout). No LLM.
 
 Upload a scanned PDF + marking scheme → get annotated PDFs (red box on correct answer, OK/X, score banner) and machine-readable analysis CSVs/JSON in a zip.
 
@@ -77,7 +77,7 @@ CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}
 - Lines: `1:A` / `1 = C` / `Q7 C`
 - Compact: `1A 2C 3C ...`
 
-Default classroom key (40 Q) is prefilled in the UI.
+A sample classroom key (40 Q) is prefilled in the UI — shorten or extend it; score total = number of entries in the scheme.
 
 ## API
 

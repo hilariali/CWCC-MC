@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .geometry import LETTERS, NUM_QUESTIONS, bubble_box, expand_box, load_geometry
+from .geometry import LETTERS, bubble_box, expand_box, load_geometry
 from .reader import QuestionRead
 
 
@@ -37,16 +37,16 @@ def annotate_page(
     font_banner = _font(36)
     font_small = _font(14)
 
-    for q in range(1, NUM_QUESTIONS + 1):
+    for d in score_info["detail"]:
+        q = d["q"]
         cols, (y0, y1) = bubble_box(geo, q)
-        expected = score_info["detail"][q - 1]["key"]
+        expected = d["key"]
         li = LETTERS.index(expected)
         x0, x1 = cols[li]
         box = expand_box(x0, y0, x1, y1, pad=3)
         draw.rectangle(box, outline=(220, 30, 30), width=3)
 
-        ok = score_info["detail"][q - 1]["ok"]
-        # Place OK/X just to the right of D column
+        ok = d["ok"]
         label_x = cols[-1][1] + 8
         label_y = y0 - 2
         if ok:
@@ -54,7 +54,6 @@ def annotate_page(
         else:
             draw.text((label_x, label_y), "X", fill=(200, 20, 20), font=font_ok)
 
-    # Score banner top-right — no student name
     w, h = im.size
     banner_w, banner_h = 260, 88
     bx0, by0 = w - banner_w - 18, 12

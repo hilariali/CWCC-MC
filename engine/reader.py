@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from PIL import Image
 
-from .geometry import LETTERS, NUM_QUESTIONS, bubble_box, load_geometry
+from .geometry import LETTERS, bubble_box, load_geometry
 
 # Pixels darker than this count as "ink" (pencil / pen).
 DARK_THRESHOLD = 140
@@ -36,20 +36,22 @@ def read_answers(
     image: Image.Image,
     geometry: dict[str, Any] | None = None,
     *,
+    questions: Iterable[int] | None = None,
     blank_min_dark: float = 0.0,
 ) -> dict[int, QuestionRead]:
     """
-    For each of Q1–40 pick the darkest A–D bubble.
+    For each requested question pick the darkest A–D bubble.
 
+    questions: iterable of 1-based question numbers (defaults to geometry max if omitted —
+    callers should pass the marking-scheme keys).
     blank_min_dark: if best dark-fraction is below this, treat as blank.
-    Default 0.0 always picks a letter (matches the calibrated classroom run).
     """
     geo = geometry or load_geometry()
-    # Work in RGB/L consistently; keep original for annotation elsewhere
     gray_base = image.convert("RGB")
     out: dict[int, QuestionRead] = {}
+    q_list = sorted(questions) if questions is not None else list(range(1, 41))
 
-    for q in range(1, NUM_QUESTIONS + 1):
+    for q in q_list:
         cols, (y0, y1) = bubble_box(geo, q)
         darkness: dict[str, float] = {}
         scores: dict[str, float] = {}
@@ -81,8 +83,9 @@ def score_page(
 ) -> dict[str, Any]:
     detail = []
     correct = wrong = blank = 0
-    for q in range(1, NUM_QUESTIONS + 1):
-        student = reads[q].choice
+    questions = sorted(key.keys())
+    for q in questions:
+        student = reads[q].choice if q in reads else None
         expected = key[q]
         if student is None:
             status = "blank"
@@ -107,7 +110,7 @@ def score_page(
         )
     return {
         "score": correct,
-        "total": NUM_QUESTIONS,
+        "total": len(questions),
         "wrong": wrong,
         "blank": blank,
         "detail": detail,

@@ -7,14 +7,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .geometry import NUM_QUESTIONS
-
 
 def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
 
-    # marks_summary.csv
+    questions = [d["q"] for d in pages[0]["detail"]] if pages else []
+    total_q = len(questions)
+
     summary_path = out_dir / "marks_summary.csv"
     with open(summary_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -37,11 +37,10 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
             )
     paths["marks_summary"] = summary_path
 
-    # student_question_matrix.csv
     matrix_path = out_dir / "student_question_matrix.csv"
     with open(matrix_path, "w", newline="", encoding="utf-8") as f:
         header = ["page", "score"]
-        for q in range(1, NUM_QUESTIONS + 1):
+        for q in questions:
             header += [f"Q{q}_correct", f"Q{q}_answer", f"Q{q}_key"]
         w = csv.writer(f)
         w.writerow(header)
@@ -52,7 +51,6 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
             w.writerow(row)
     paths["student_question_matrix"] = matrix_path
 
-    # student_question_long.csv
     long_path = out_dir / "student_question_long.csv"
     with open(long_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -73,7 +71,6 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                 )
     paths["student_question_long"] = long_path
 
-    # question_stats.csv + who right/wrong
     stats_path = out_dir / "question_stats.csv"
     who_path = out_dir / "question_who_right_wrong.csv"
     n_pages = max(len(pages), 1)
@@ -98,11 +95,11 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
         ww.writerow(
             ["question", "key", "pages_correct", "pages_wrong", "pages_blank"]
         )
-        for q in range(1, NUM_QUESTIONS + 1):
+        for qi, q in enumerate(questions):
             right, wrong, blank = [], [], []
-            key_ans = pages[0]["detail"][q - 1]["key"] if pages else ""
+            key_ans = pages[0]["detail"][qi]["key"] if pages else ""
             for p in pages:
-                d = p["detail"][q - 1]
+                d = p["detail"][qi]
                 label = str(p["page"])
                 if d["status"] == "correct":
                     right.append(label)
@@ -142,7 +139,7 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
 
     summary = {
         "num_pages": len(pages),
-        "total_questions": NUM_QUESTIONS,
+        "total_questions": total_q,
         "scores": [
             {
                 "page": p["page"],

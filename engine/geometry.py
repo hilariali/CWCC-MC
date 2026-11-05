@@ -9,8 +9,12 @@ from typing import Any
 _GEOM_PATH = Path(__file__).with_name("geometry.json")
 
 LETTERS = ("A", "B", "C", "D")
-NUM_QUESTIONS = 40
+# Sheet layout: col1 Q1–25, col2 Q26–50. Marking uses only questions in the scheme.
+MAX_QUESTIONS = 50
 DPI = 150
+
+# Back-compat alias (old code / docs referred to a fixed 40-Q classroom paper)
+NUM_QUESTIONS = 40
 
 
 def load_geometry(path: Path | None = None) -> dict[str, Any]:
@@ -28,9 +32,9 @@ def load_geometry(path: Path | None = None) -> dict[str, Any]:
 
 
 def bubble_box(geometry: dict[str, Any], question: int) -> tuple[list[list[int]], list[int]]:
-    """Return (col_x_pairs A–D, [y0,y1]) for a 1-based question 1–40."""
-    if not 1 <= question <= NUM_QUESTIONS:
-        raise ValueError(f"question out of range: {question}")
+    """Return (col_x_pairs A–D, [y0,y1]) for a 1-based question 1–MAX_QUESTIONS."""
+    if not 1 <= question <= MAX_QUESTIONS:
+        raise ValueError(f"question out of range: {question} (sheet supports 1–{MAX_QUESTIONS})")
     if question <= 25:
         cols = geometry["COL1"]
         row = geometry["ROW_Y"][question - 1]
