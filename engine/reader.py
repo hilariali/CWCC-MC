@@ -7,21 +7,29 @@ from typing import Any, Iterable
 
 from PIL import Image
 
-from .geometry import LETTERS, bubble_box, load_geometry
+from .geometry import LETTERS, bubble_box, load_geometry, scale_geometry
 
 # Pixels darker than this count as "ink" (pencil / pen).
 DARK_THRESHOLD = 140
+# If the darkest bubble is still this empty, treat as blank.
+DEFAULT_BLANK_MIN_DARK = 0.0  # match calibrated classroom run; raise to treat empty bubbles as blank
 
 
 @dataclass
 class QuestionRead:
     question: int
     choice: str | None  # A–D or None if blank
-    darkness: dict[str, float]  # letter -> dark fraction
-    scores: dict[str, float]  # letter -> inverse mean brightness
+    darkness: dict[str, float]
+    scores: dict[str, float]
 
 
 def _region_stats(im: Image.Image, x0: int, y0: int, x1: int, y1: int) -> tuple[float, float]:
+    # Clamp to image bounds
+    w, h = im.size
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0, 0.0
     crop = im.crop((x0, y0, x1, y1)).convert("L")
     pixels = list(crop.getdata())
     if not pixels:
@@ -37,16 +45,15 @@ def read_answers(
     geometry: dict[str, Any] | None = None,
     *,
     questions: Iterable[int] | None = None,
-    blank_min_dark: float = 0.0,
+    blank_min_dark: float = DEFAULT_BLANK_MIN_DARK,
 ) -> dict[int, QuestionRead]:
     """
     For each requested question pick the darkest A–D bubble.
-
-    questions: iterable of 1-based question numbers (defaults to geometry max if omitted —
-    callers should pass the marking-scheme keys).
-    blank_min_dark: if best dark-fraction is below this, treat as blank.
+    Geometry is auto-scaled to the page pixel size.
     """
-    geo = geometry or load_geometry()
+    base = geometry or load_geometry()
+    w, h = image.size
+    geo = scale_geometry(base, w, h)
     gray_base = image.convert("RGB")
     out: dict[int, QuestionRead] = {}
     q_list = sorted(questions) if questions is not None else list(range(1, 41))
@@ -63,8 +70,7 @@ def read_answers(
             ranked.append((dark, inv, letter))
         ranked.sort(key=lambda t: (t[0], t[1]), reverse=True)
         best_dark, _, best_letter = ranked[0]
-        choice: str | None
-        if best_dark < blank_min_dark:
+        if blank_min_dark > 0 and best_dark < blank_min_dark:
             choice = None
         else:
             choice = best_letter

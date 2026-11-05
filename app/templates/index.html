@@ -90,8 +90,8 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>MC Exam Marking <span class="badge">v1 · no LLM</span></h1>
-    <p class="sub">Upload CWCCC-style answer sheets (PDF) + marking scheme → annotated PDFs + analysis CSVs. Score total = number of answers in your scheme.</p>
+    <h1>MC Exam Marking <span class="badge">v1.1 · no LLM</span></h1>
+    <p class="sub">Upload any number of CWCCC-style pages in one PDF + marking scheme → annotated PDFs + analysis. Score total = scheme length. Works page-by-page (one bad page won’t kill the whole job).</p>
 
     <form id="mark-form" class="card" enctype="multipart/form-data">
       <label for="pdf">Student answer sheet PDF</label>
@@ -145,40 +145,82 @@
       document.getElementById('scheme').value = defaultScheme;
     };
 
+    function formatDetail(detail) {
+      if (detail == null) return '';
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail)) {
+        return detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join('; ');
+      }
+      try { return JSON.stringify(detail); } catch { return String(detail); }
+    }
+
+    function showResults(data) {
+      statusEl.textContent = 'Done';
+      const errPages = (data.page_errors || []).length;
+      jobMeta.textContent = ` · job ${data.job_id} · ${data.num_pages} page(s)`
+        + (data.num_questions ? ` · ${data.num_questions} Q` : '')
+        + ` · mean ${data.mean_score}`
+        + (errPages ? ` · ${errPages} page error(s)` : '');
+      scoreBody.innerHTML = '';
+      for (const s of data.scores) {
+        const tr = document.createElement('tr');
+        const note = s.error ? ` <span style="color:#fca5a5">(${s.error})</span>` : '';
+        tr.innerHTML = `<td>P${String(s.page).padStart(2,'0')}</td>
+          <td><strong>${s.score} / ${s.total}</strong>${note}</td>
+          <td>${s.wrong}</td><td>${s.blank}</td>`;
+        scoreBody.appendChild(tr);
+      }
+      previews.innerHTML = '';
+      (data.preview_urls || []).forEach((url, i) => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.innerHTML = `<img src="${url}" alt="page preview" /><span>Preview</span>`;
+        previews.appendChild(a);
+      });
+      downloadLink.href = data.download_url;
+      results.hidden = false;
+    }
+
+    async function pollJob(jobId) {
+      const started = Date.now();
+      while (true) {
+        if (Date.now() - started > 15 * 60 * 1000) {
+          throw new Error('Timed out waiting for marking (15 min). Try fewer pages or retry.');
+        }
+        const res = await fetch('/api/jobs/' + jobId);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(formatDetail(data.detail) || res.statusText || 'Status check failed');
+        }
+        if (data.status === 'done') return data;
+        if (data.status === 'error') {
+          throw new Error(data.error || 'Marking failed');
+        }
+        const stage = data.stage || data.status || 'running';
+        const pageInfo = data.page ? ` page ${data.page}/${data.total_pages || '?'}` : '';
+        statusEl.textContent = `Marking… ${stage}${pageInfo}`;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       errorEl.hidden = true;
       results.hidden = true;
       btn.disabled = true;
-      statusEl.textContent = 'Marking… this may take a moment';
+      statusEl.textContent = 'Uploading…';
 
       const fd = new FormData(form);
       try {
         const res = await fetch('/api/mark', { method: 'POST', body: fd });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error(data.detail || res.statusText || 'Marking failed');
+          throw new Error(formatDetail(data.detail) || res.statusText || 'Marking failed');
         }
-        statusEl.textContent = 'Done';
-        jobMeta.textContent = ` · job ${data.job_id} · ${data.num_pages} page(s) · mean ${data.mean_score}`;
-        scoreBody.innerHTML = '';
-        for (const s of data.scores) {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>P${String(s.page).padStart(2,'0')}</td>
-            <td><strong>${s.score} / ${s.total}</strong></td>
-            <td>${s.wrong}</td><td>${s.blank}</td>`;
-          scoreBody.appendChild(tr);
-        }
-        previews.innerHTML = '';
-        data.preview_urls.forEach((url, i) => {
-          const a = document.createElement('a');
-          a.href = url;
-          a.target = '_blank';
-          a.innerHTML = `<img src="${url}" alt="page ${i+1}" /><span>Page ${i+1}</span>`;
-          previews.appendChild(a);
-        });
-        downloadLink.href = data.download_url;
-        results.hidden = false;
+        statusEl.textContent = 'Queued…';
+        const finalData = await pollJob(data.job_id);
+        showResults(finalData);
       } catch (err) {
         errorEl.hidden = false;
         errorEl.textContent = String(err.message || err);

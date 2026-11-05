@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .geometry import LETTERS, bubble_box, expand_box, load_geometry
+from .geometry import LETTERS, bubble_box, expand_box, load_geometry, scale_geometry
 from .reader import QuestionRead
 
 
@@ -30,7 +30,9 @@ def annotate_page(
     geometry: dict[str, Any] | None = None,
 ) -> Image.Image:
     """Return annotated RGB copy. Red box = correct key bubble."""
-    geo = geometry or load_geometry()
+    base = geometry or load_geometry()
+    w, h = image.size
+    geo = scale_geometry(base, w, h)
     im = image.convert("RGB").copy()
     draw = ImageDraw.Draw(im)
     font_ok = _font(18)
@@ -54,7 +56,6 @@ def annotate_page(
         else:
             draw.text((label_x, label_y), "X", fill=(200, 20, 20), font=font_ok)
 
-    w, h = im.size
     banner_w, banner_h = 260, 88
     bx0, by0 = w - banner_w - 18, 12
     bx1, by1 = bx0 + banner_w, by0 + banner_h

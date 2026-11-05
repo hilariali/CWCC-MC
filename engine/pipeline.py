@@ -8,7 +8,7 @@ import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 from pypdf import PdfWriter
@@ -29,12 +29,12 @@ class MarkingResult:
     pdf_paths: list[Path] = field(default_factory=list)
     combined_pdf: Path | None = None
     analysis_paths: dict[str, Path] = field(default_factory=dict)
+    page_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
 def pdf_to_pngs(pdf_path: Path, out_dir: Path, dpi: int = DPI) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = out_dir / "page"
-    # Clear previous
     for old in out_dir.glob("page-*.png"):
         old.unlink()
     cmd = [
@@ -55,7 +55,7 @@ def pdf_to_pngs(pdf_path: Path, out_dir: Path, dpi: int = DPI) -> list[Path]:
         raise RuntimeError(f"pdftoppm failed: {e.stderr or e.stdout}") from e
     pages = sorted(out_dir.glob("page-*.png"))
     if not pages:
-        raise RuntimeError("pdftoppm produced no page images")
+        raise RuntimeError("pdftoppm produced no page images — is the PDF valid/scanned?")
     return pages
 
 
@@ -70,15 +70,23 @@ def mark_pdf(
     job_dir: Path,
     *,
     geometry_path: Path | None = None,
+    dpi: int | None = None,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> MarkingResult:
     job_dir = Path(job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
+
+    def report(stage: str, **extra: Any) -> None:
+        if progress:
+            progress(stage, extra)
 
     key = parse_marking_scheme(scheme_text)
     (job_dir / "marking_scheme.json").write_text(
         json.dumps({str(k): v for k, v in key.items()}, indent=2),
         encoding="utf-8",
     )
+    questions = sorted(key.keys())
+    report("parsed_scheme", num_questions=len(questions))
 
     geo = load_geometry(geometry_path)
 
@@ -89,39 +97,76 @@ def mark_pdf(
     for d in (pages_dir, annotated_dir, preview_dir, analysis_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Keep a copy of the uploaded PDF
     pdf_copy = job_dir / "input.pdf"
     if Path(pdf_path).resolve() != pdf_copy.resolve():
         shutil.copy2(pdf_path, pdf_copy)
 
-    page_pngs = pdf_to_pngs(pdf_copy, pages_dir, dpi=DPI)
+    use_dpi = dpi or DPI
+    report("rasterizing", dpi=use_dpi)
+    page_pngs = pdf_to_pngs(pdf_copy, pages_dir, dpi=use_dpi)
+    report("rasterized", num_pages=len(page_pngs))
 
     result = MarkingResult(job_dir=job_dir)
     page_records: list[dict[str, Any]] = []
 
-    questions = sorted(key.keys())
     for idx, png in enumerate(page_pngs, start=1):
-        im = Image.open(png)
-        reads = read_answers(im, geo, questions=questions)
-        scored = score_page(reads, key)
-        scored["page"] = idx
-        page_records.append(scored)
+        report("marking_page", page=idx, total_pages=len(page_pngs))
+        try:
+            with Image.open(png) as im0:
+                im = im0.convert("RGB")
+                # Force load before file closes
+                im.load()
+            reads = read_answers(im, geo, questions=questions)
+            scored = score_page(reads, key)
+            scored["page"] = idx
+            scored["error"] = None
+            page_records.append(scored)
 
-        annotated = annotate_page(im, reads, scored, geo)
-        preview_path = preview_dir / f"page-{idx:02d}-marked.png"
-        annotated.save(preview_path, "PNG")
-        result.preview_paths.append(preview_path)
+            annotated = annotate_page(im, reads, scored, geo)
+            preview_path = preview_dir / f"page-{idx:02d}-marked.png"
+            annotated.save(preview_path, "PNG", optimize=True)
+            result.preview_paths.append(preview_path)
 
-        pdf_out = annotated_dir / f"P{idx:02d}_page{idx:02d}_marked.pdf"
-        _save_pdf(annotated, pdf_out)
-        result.pdf_paths.append(pdf_out)
+            pdf_out = annotated_dir / f"P{idx:02d}_page{idx:02d}_marked.pdf"
+            _save_pdf(annotated, pdf_out)
+            result.pdf_paths.append(pdf_out)
+            # free memory
+            del annotated, reads, im
+        except Exception as e:
+            err = {"page": idx, "error": str(e)}
+            result.page_errors.append(err)
+            page_records.append(
+                {
+                    "page": idx,
+                    "score": 0,
+                    "total": len(questions),
+                    "wrong": 0,
+                    "blank": len(questions),
+                    "detail": [
+                        {
+                            "q": q,
+                            "student": "",
+                            "key": key[q],
+                            "status": "error",
+                            "ok": False,
+                        }
+                        for q in questions
+                    ],
+                    "error": str(e),
+                }
+            )
+
+    if not result.pdf_paths:
+        raise RuntimeError(
+            "No pages could be marked. "
+            + (result.page_errors[0]["error"] if result.page_errors else "Unknown error")
+        )
 
     result.pages = page_records
     (job_dir / "scores.json").write_text(
         json.dumps(page_records, indent=2), encoding="utf-8"
     )
 
-    # Combined PDF
     combined = annotated_dir / "ALL_pages_marked.pdf"
     writer = PdfWriter()
     for p in result.pdf_paths:
@@ -131,8 +176,10 @@ def mark_pdf(
     writer.close()
     result.combined_pdf = combined
 
-    result.analysis_paths = write_analysis(page_records, analysis_dir)
-    # Also copy analysis next to annotated for the zip bundle
+    result.analysis_paths = write_analysis(
+        [p for p in page_records if not p.get("error")], analysis_dir
+    ) if any(not p.get("error") for p in page_records) else write_analysis(page_records, analysis_dir)
+
     bundle_dir = job_dir / "bundle"
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
@@ -142,15 +189,11 @@ def mark_pdf(
     shutil.copy2(combined, bundle_dir / combined.name)
     for p in result.analysis_paths.values():
         shutil.copy2(p, bundle_dir / p.name)
-    # marks_summary already in analysis; ensure present
-    shutil.copy2(
-        result.analysis_paths["marks_summary"],
-        bundle_dir / "marks_summary.csv",
-    )
 
     zip_path = job_dir / "MC_exam_marked.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for fpath in sorted(bundle_dir.iterdir()):
             zf.write(fpath, arcname=fpath.name)
     result.zip_path = zip_path
+    report("done", num_pages=len(page_records), errors=len(result.page_errors))
     return result

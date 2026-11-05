@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
 import sys
+import threading
+import traceback
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
@@ -26,8 +29,11 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 APP_PASSWORD = os.environ.get("MARKING_APP_PASSWORD", "").strip()
 security = HTTPBasic(auto_error=False)
 
-app = FastAPI(title="MC Exam Marking", version="1.0.0")
+app = FastAPI(title="MC Exam Marking", version="1.1.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+_jobs_lock = threading.Lock()
+_jobs: dict[str, dict] = {}
 
 
 def _default_scheme_text() -> str:
@@ -45,21 +51,91 @@ def require_password(
             detail="Authentication required",
             headers={"WWW-Authenticate": "Basic"},
         )
-    user_ok = secrets.compare_digest(credentials.username or "", "mark")
-    # Also allow empty username with password only via password field
     pass_ok = secrets.compare_digest(credentials.password or "", APP_PASSWORD)
-    # Accept username "mark" OR any username if password matches
     if not pass_ok:
         raise HTTPException(
             status_code=401,
             detail="Invalid password",
             headers={"WWW-Authenticate": "Basic"},
         )
-    _ = user_ok  # username optional
 
 
-@app.get("/", response_class=HTMLResponse)
+def _set_job(job_id: str, **fields) -> None:
+    fields.pop("job_id", None)
+    with _jobs_lock:
+        cur = _jobs.get(job_id, {})
+        cur.update(fields)
+        cur["job_id"] = job_id
+        _jobs[job_id] = cur
+        # Persist status for multi-worker / restart friendliness
+        job_dir = DATA_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        status_path = job_dir / "status.json"
+        dump = {k: v for k, v in cur.items() if k != "result"}
+        status_path.write_text(json.dumps(dump, indent=2), encoding="utf-8")
+
+
+def _get_job(job_id: str) -> dict | None:
+    with _jobs_lock:
+        if job_id in _jobs:
+            return dict(_jobs[job_id])
+    status_path = DATA_DIR / job_id / "status.json"
+    if status_path.is_file():
+        return json.loads(status_path.read_text(encoding="utf-8"))
+    return None
+
+
+def _run_mark_job(job_id: str, pdf_path: Path, scheme: str) -> None:
+    job_dir = DATA_DIR / job_id
+
+    def progress(stage: str, extra: dict) -> None:
+        _set_job(job_id, status="running", stage=stage, **extra)
+
+    try:
+        _set_job(job_id, status="running", stage="starting")
+        result = mark_pdf(pdf_path, scheme, job_dir, progress=progress)
+        payload = {
+            "status": "done",
+            "num_pages": len(result.pages),
+            "num_questions": result.pages[0]["total"] if result.pages else 0,
+            "page_errors": result.page_errors,
+            "scores": [
+                {
+                    "page": p["page"],
+                    "score": p["score"],
+                    "total": p["total"],
+                    "wrong": p["wrong"],
+                    "blank": p["blank"],
+                    "error": p.get("error"),
+                }
+                for p in result.pages
+            ],
+            "mean_score": round(
+                sum(p["score"] for p in result.pages if not p.get("error"))
+                / max(sum(1 for p in result.pages if not p.get("error")), 1),
+                2,
+            ),
+            "download_url": f"/api/jobs/{job_id}/download",
+            "preview_urls": [
+                f"/api/jobs/{job_id}/preview/{p['page']}"
+                for p in result.pages
+                if not p.get("error")
+            ],
+        }
+        _set_job(job_id, **payload)
+    except Exception as e:
+        _set_job(
+            job_id,
+            status="error",
+            error=str(e),
+            traceback=traceback.format_exc()[-2000:],
+        )
+
+
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def index(request: Request, _: None = Depends(require_password)):
+    if request.method == "HEAD":
+        return Response(status_code=200)
     return templates.TemplateResponse(
         "index.html",
         {
@@ -76,10 +152,11 @@ async def api_mark(
     scheme: str = Form(...),
     _: None = Depends(require_password),
 ):
-    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Please upload a PDF answer sheet")
+    name = (pdf.filename or "").lower()
+    if not name.endswith(".pdf"):
+        raise HTTPException(400, "Please upload a PDF answer sheet (.pdf)")
     try:
-        parse_marking_scheme(scheme)
+        key = parse_marking_scheme(scheme)
     except Exception as e:
         raise HTTPException(400, f"Invalid marking scheme: {e}") from e
 
@@ -92,37 +169,65 @@ async def api_mark(
     if not content:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(400, "Empty PDF upload")
+    if len(content) > 80 * 1024 * 1024:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(400, "PDF too large (max 80 MB)")
     pdf_path.write_bytes(content)
 
-    try:
-        result = mark_pdf(pdf_path, scheme, job_dir)
-    except Exception as e:
-        raise HTTPException(500, f"Marking failed: {e}") from e
+    _set_job(
+        job_id,
+        status="queued",
+        num_questions=len(key),
+        filename=pdf.filename,
+    )
+    t = threading.Thread(
+        target=_run_mark_job, args=(job_id, pdf_path, scheme), daemon=True
+    )
+    t.start()
 
     return JSONResponse(
         {
             "job_id": job_id,
-            "num_pages": len(result.pages),
-            "scores": [
-                {
-                    "page": p["page"],
-                    "score": p["score"],
-                    "total": p["total"],
-                    "wrong": p["wrong"],
-                    "blank": p["blank"],
-                }
-                for p in result.pages
-            ],
-            "mean_score": round(
-                sum(p["score"] for p in result.pages) / max(len(result.pages), 1), 2
-            ),
-            "download_url": f"/api/jobs/{job_id}/download",
-            "preview_urls": [
-                f"/api/jobs/{job_id}/preview/{i}"
-                for i in range(1, len(result.pages) + 1)
-            ],
+            "status": "queued",
+            "num_questions": len(key),
+            "status_url": f"/api/jobs/{job_id}",
         }
     )
+
+
+@app.get("/api/jobs/{job_id}")
+async def api_job_status(job_id: str, _: None = Depends(require_password)):
+    job = _get_job(job_id)
+    if not job:
+        # fallback: completed artifact without in-memory status
+        scores_path = DATA_DIR / job_id / "scores.json"
+        if scores_path.is_file():
+            pages = json.loads(scores_path.read_text(encoding="utf-8"))
+            return {
+                "job_id": job_id,
+                "status": "done",
+                "num_pages": len(pages),
+                "scores": [
+                    {
+                        "page": p["page"],
+                        "score": p["score"],
+                        "total": p["total"],
+                        "wrong": p["wrong"],
+                        "blank": p["blank"],
+                        "error": p.get("error"),
+                    }
+                    for p in pages
+                ],
+                "mean_score": round(
+                    sum(p["score"] for p in pages) / max(len(pages), 1), 2
+                ),
+                "download_url": f"/api/jobs/{job_id}/download",
+                "preview_urls": [
+                    f"/api/jobs/{job_id}/preview/{i}" for i in range(1, len(pages) + 1)
+                ],
+            }
+        raise HTTPException(404, "Job not found")
+    return JSONResponse(job)
 
 
 @app.get("/api/jobs/{job_id}/preview/{page}")
@@ -139,7 +244,7 @@ async def api_preview(
 async def api_download(job_id: str, _: None = Depends(require_password)):
     path = DATA_DIR / job_id / "MC_exam_marked.zip"
     if not path.is_file():
-        raise HTTPException(404, "Download not found")
+        raise HTTPException(404, "Download not found — job may still be running or failed")
     return FileResponse(
         path,
         media_type="application/zip",
@@ -147,29 +252,7 @@ async def api_download(job_id: str, _: None = Depends(require_password)):
     )
 
 
-@app.get("/api/jobs/{job_id}/summary")
-async def api_summary(job_id: str, _: None = Depends(require_password)):
-    path = DATA_DIR / job_id / "scores.json"
-    if not path.is_file():
-        raise HTTPException(404, "Job not found")
-    import json
-
-    pages = json.loads(path.read_text(encoding="utf-8"))
-    return {
-        "job_id": job_id,
-        "scores": [
-            {
-                "page": p["page"],
-                "score": p["score"],
-                "total": p["total"],
-                "wrong": p["wrong"],
-                "blank": p["blank"],
-            }
-            for p in pages
-        ],
-    }
-
-
 @app.get("/health")
+@app.head("/health")
 async def health():
-    return {"ok": True, "password_required": bool(APP_PASSWORD)}
+    return {"ok": True, "password_required": bool(APP_PASSWORD), "version": "1.1.0"}
