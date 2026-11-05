@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MC Exam Marking</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #9aa8bc;
+      --accent: #3b82f6;
+      --accent2: #22c55e;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1e3a5f 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { margin: 0 0 6px; font-size: 1.75rem; }
+    .sub { color: var(--muted); margin-bottom: 28px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 18px;
+    }
+    label { display: block; font-weight: 600; margin-bottom: 8px; }
+    .hint { color: var(--muted); font-size: 0.9rem; margin: 6px 0 12px; }
+    input[type=file], textarea {
+      width: 100%;
+      background: #0d121a;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    textarea { min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 18px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #334155; }
+    button.success { background: var(--accent2); color: #052e16; }
+    .status { color: var(--muted); }
+    .error { color: #fecaca; background: #7f1d1d55; border: 1px solid #991b1b; padding: 10px 12px; border-radius: 8px; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+    .previews {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .previews a {
+      display: block;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d121a;
+    }
+    .previews img { width: 100%; display: block; }
+    .previews span { display: block; padding: 6px 8px; font-size: 0.85rem; color: var(--muted); }
+    .badge {
+      display: inline-block;
+      background: #14532d;
+      color: #bbf7d0;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>MC Exam Marking <span class="badge">v1 · no LLM</span></h1>
+    <p class="sub">Upload CWCCC-style answer sheets (PDF) + marking scheme → annotated PDFs + analysis CSVs.</p>
+
+    <form id="mark-form" class="card" enctype="multipart/form-data">
+      <label for="pdf">Student answer sheet PDF</label>
+      <p class="hint">Multi-page scan; one student sheet per page. Calibrated for CWCCC OMR at ~150 dpi.</p>
+      <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
+
+      <label for="scheme" style="margin-top:18px">Marking scheme (Q1–40)</label>
+      <p class="hint">JSON <code>{"1":"A",...}</code> or lines <code>1:A</code> / compact <code>1A 2C …</code>. Default key is prefilled.</p>
+      <textarea id="scheme" name="scheme">{{ default_scheme }}</textarea>
+
+      <div class="row">
+        <button type="submit" id="btn-mark">Mark papers</button>
+        <button type="button" class="secondary" id="btn-reset-scheme">Reset default key</button>
+        <span class="status" id="status"></span>
+      </div>
+      <div id="error" class="error" hidden></div>
+    </form>
+
+    <div class="card" id="results" hidden>
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <strong>Results</strong>
+          <span class="status" id="job-meta"></span>
+        </div>
+        <a id="download-link" href="#"><button type="button" class="success">Download ZIP</button></a>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Page</th><th>Score</th><th>Wrong</th><th>Blank</th></tr>
+        </thead>
+        <tbody id="score-body"></tbody>
+      </table>
+      <h3 style="margin:18px 0 0; font-size:1rem">Previews</h3>
+      <div class="previews" id="previews"></div>
+    </div>
+  </div>
+
+  <script>
+    const defaultScheme = {{ default_scheme | tojson }};
+    const form = document.getElementById('mark-form');
+    const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('error');
+    const results = document.getElementById('results');
+    const scoreBody = document.getElementById('score-body');
+    const previews = document.getElementById('previews');
+    const downloadLink = document.getElementById('download-link');
+    const jobMeta = document.getElementById('job-meta');
+    const btn = document.getElementById('btn-mark');
+
+    document.getElementById('btn-reset-scheme').onclick = () => {
+      document.getElementById('scheme').value = defaultScheme;
+    };
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorEl.hidden = true;
+      results.hidden = true;
+      btn.disabled = true;
+      statusEl.textContent = 'Marking… this may take a moment';
+
+      const fd = new FormData(form);
+      try {
+        const res = await fetch('/api/mark', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || res.statusText || 'Marking failed');
+        }
+        statusEl.textContent = 'Done';
+        jobMeta.textContent = ` · job ${data.job_id} · ${data.num_pages} page(s) · mean ${data.mean_score}`;
+        scoreBody.innerHTML = '';
+        for (const s of data.scores) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>P${String(s.page).padStart(2,'0')}</td>
+            <td><strong>${s.score} / ${s.total}</strong></td>
+            <td>${s.wrong}</td><td>${s.blank}</td>`;
+          scoreBody.appendChild(tr);
+        }
+        previews.innerHTML = '';
+        data.preview_urls.forEach((url, i) => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.target = '_blank';
+          a.innerHTML = `<img src="${url}" alt="page ${i+1}" /><span>Page ${i+1}</span>`;
+          previews.appendChild(a);
+        });
+        downloadLink.href = data.download_url;
+        results.hidden = false;
+      } catch (err) {
+        errorEl.hidden = false;
+        errorEl.textContent = String(err.message || err);
+        statusEl.textContent = '';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

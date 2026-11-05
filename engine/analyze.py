@@ -1,0 +1,168 @@
+"""Machine-readable analysis CSVs / JSON for a marked job."""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+from .geometry import NUM_QUESTIONS
+
+
+def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+
+    # marks_summary.csv
+    summary_path = out_dir / "marks_summary.csv"
+    with open(summary_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Page", "Score", "Total", "Wrong", "Blank", "Wrong/blank"])
+        for p in pages:
+            wrongs = []
+            for d in p["detail"]:
+                if not d["ok"]:
+                    stu = d["student"] or "blank"
+                    wrongs.append(f"Q{d['q']}:{stu}->{d['key']}")
+            w.writerow(
+                [
+                    p["page"],
+                    p["score"],
+                    p["total"],
+                    p["wrong"],
+                    p["blank"],
+                    "; ".join(wrongs),
+                ]
+            )
+    paths["marks_summary"] = summary_path
+
+    # student_question_matrix.csv
+    matrix_path = out_dir / "student_question_matrix.csv"
+    with open(matrix_path, "w", newline="", encoding="utf-8") as f:
+        header = ["page", "score"]
+        for q in range(1, NUM_QUESTIONS + 1):
+            header += [f"Q{q}_correct", f"Q{q}_answer", f"Q{q}_key"]
+        w = csv.writer(f)
+        w.writerow(header)
+        for p in pages:
+            row: list[Any] = [p["page"], p["score"]]
+            for d in p["detail"]:
+                row += [1 if d["ok"] else 0, d["student"] or "", d["key"]]
+            w.writerow(row)
+    paths["student_question_matrix"] = matrix_path
+
+    # student_question_long.csv
+    long_path = out_dir / "student_question_long.csv"
+    with open(long_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["page", "question", "student_answer", "key", "correct", "status"]
+        )
+        for p in pages:
+            for d in p["detail"]:
+                w.writerow(
+                    [
+                        p["page"],
+                        d["q"],
+                        d["student"] or "",
+                        d["key"],
+                        1 if d["ok"] else 0,
+                        d["status"],
+                    ]
+                )
+    paths["student_question_long"] = long_path
+
+    # question_stats.csv + who right/wrong
+    stats_path = out_dir / "question_stats.csv"
+    who_path = out_dir / "question_who_right_wrong.csv"
+    n_pages = max(len(pages), 1)
+    q_stats: list[dict[str, Any]] = []
+    with open(stats_path, "w", newline="", encoding="utf-8") as fs, open(
+        who_path, "w", newline="", encoding="utf-8"
+    ) as fw:
+        ws = csv.writer(fs)
+        ww = csv.writer(fw)
+        ws.writerow(
+            [
+                "question",
+                "key",
+                "correct_count",
+                "wrong_count",
+                "blank_count",
+                "correct_pct",
+                "wrong_pct",
+                "blank_pct",
+            ]
+        )
+        ww.writerow(
+            ["question", "key", "pages_correct", "pages_wrong", "pages_blank"]
+        )
+        for q in range(1, NUM_QUESTIONS + 1):
+            right, wrong, blank = [], [], []
+            key_ans = pages[0]["detail"][q - 1]["key"] if pages else ""
+            for p in pages:
+                d = p["detail"][q - 1]
+                label = str(p["page"])
+                if d["status"] == "correct":
+                    right.append(label)
+                elif d["status"] == "blank":
+                    blank.append(label)
+                else:
+                    wrong.append(label)
+            cc, wc, bc = len(right), len(wrong), len(blank)
+            row_stat = {
+                "question": q,
+                "key": key_ans,
+                "correct_count": cc,
+                "wrong_count": wc,
+                "blank_count": bc,
+                "correct_pct": round(100.0 * cc / n_pages, 1),
+                "wrong_pct": round(100.0 * wc / n_pages, 1),
+                "blank_pct": round(100.0 * bc / n_pages, 1),
+            }
+            q_stats.append(row_stat)
+            ws.writerow(
+                [
+                    q,
+                    key_ans,
+                    cc,
+                    wc,
+                    bc,
+                    row_stat["correct_pct"],
+                    row_stat["wrong_pct"],
+                    row_stat["blank_pct"],
+                ]
+            )
+            ww.writerow(
+                [q, key_ans, " ".join(right), " ".join(wrong), " ".join(blank)]
+            )
+    paths["question_stats"] = stats_path
+    paths["question_who_right_wrong"] = who_path
+
+    summary = {
+        "num_pages": len(pages),
+        "total_questions": NUM_QUESTIONS,
+        "scores": [
+            {
+                "page": p["page"],
+                "score": p["score"],
+                "total": p["total"],
+                "wrong": p["wrong"],
+                "blank": p["blank"],
+            }
+            for p in pages
+        ],
+        "mean_score": round(
+            sum(p["score"] for p in pages) / n_pages, 2
+        )
+        if pages
+        else 0,
+        "question_stats": q_stats,
+        "hardest": sorted(q_stats, key=lambda r: r["correct_pct"])[:5],
+        "easiest": sorted(q_stats, key=lambda r: -r["correct_pct"])[:5],
+    }
+    summary_json = out_dir / "analysis_summary.json"
+    summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    paths["analysis_summary"] = summary_json
+    return paths
