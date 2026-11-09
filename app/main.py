@@ -29,7 +29,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 APP_PASSWORD = os.environ.get("MARKING_APP_PASSWORD", "").strip()
 security = HTTPBasic(auto_error=False)
 
-app = FastAPI(title="MC Exam Marking", version="1.1.0")
+app = FastAPI(title="MC Exam Marking", version="2.0.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 _jobs_lock = threading.Lock()
@@ -106,7 +106,11 @@ def _run_mark_job(job_id: str, pdf_path: Path, scheme: str) -> None:
                     "total": p["total"],
                     "wrong": p["wrong"],
                     "blank": p["blank"],
+                    "ambiguous": p.get("ambiguous", 0),
                     "error": p.get("error"),
+                    "alignment": (p.get("alignment") or {}).get("method"),
+                    "warnings": p.get("warnings") or [],
+                    "checks": p.get("checks") or [],
                 }
                 for p in result.pages
             ],
@@ -214,7 +218,11 @@ async def api_job_status(job_id: str, _: None = Depends(require_password)):
                         "total": p["total"],
                         "wrong": p["wrong"],
                         "blank": p["blank"],
+                        "ambiguous": p.get("ambiguous", 0),
                         "error": p.get("error"),
+                        "alignment": (p.get("alignment") or {}).get("method"),
+                        "warnings": p.get("warnings") or [],
+                        "checks": p.get("checks") or [],
                     }
                     for p in pages
                 ],
@@ -255,4 +263,4 @@ async def api_download(job_id: str, _: None = Depends(require_password)):
 @app.get("/health")
 @app.head("/health")
 async def health():
-    return {"ok": True, "password_required": bool(APP_PASSWORD), "version": "1.1.0"}
+    return {"ok": True, "password_required": bool(APP_PASSWORD), "version": "2.0.0"}

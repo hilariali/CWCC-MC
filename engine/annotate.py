@@ -1,4 +1,4 @@
-"""Draw red key boxes, OK/X markers, and score banner (no name overlay)."""
+"""Draw red key boxes, OK/X/AMB markers, and score banner (no name overlay)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .geometry import LETTERS, bubble_box, expand_box, load_geometry, scale_geometry
-from .reader import QuestionRead
+from .geometry import LETTERS, expand_box
+from .layout import PageLayout
 
 
 def _font(size: int) -> ImageFont.ImageFont:
@@ -25,15 +25,20 @@ def _font(size: int) -> ImageFont.ImageFont:
 
 def annotate_page(
     image: Image.Image,
-    reads: dict[int, QuestionRead],
+    reads: dict,
     score_info: dict[str, Any],
     geometry: dict[str, Any] | None = None,
+    layout: PageLayout | None = None,
+    key_only: bool = True,
 ) -> Image.Image:
-    """Return annotated RGB copy. Red box = correct key bubble."""
-    base = geometry or load_geometry()
-    w, h = image.size
-    geo = scale_geometry(base, w, h)
-    im = image.convert("RGB").copy()
+    """Return annotated RGB copy of the upright page.
+
+    Red box = correct answer. Student's pick: green box if right, blue box if wrong.
+    Orange = ambiguous marks. Label to the right: OK / X / AMB / — (blank), '?' = check note.
+    """
+    base_img = layout.image if layout is not None else image
+    im = base_img.convert("RGB").copy()
+    w, h = im.size
     draw = ImageDraw.Draw(im)
     font_ok = _font(18)
     font_banner = _font(36)
@@ -41,28 +46,63 @@ def annotate_page(
 
     for d in score_info["detail"]:
         q = d["q"]
-        cols, (y0, y1) = bubble_box(geo, q)
-        expected = d["key"]
-        li = LETTERS.index(expected)
-        x0, x1 = cols[li]
-        box = expand_box(x0, y0, x1, y1, pad=3)
-        draw.rectangle(box, outline=(220, 30, 30), width=3)
+        rd = reads.get(q)
+        if rd is None or not rd.boxes:
+            continue
+        bx = rd.boxes
+        status = d.get("status")
+        y0 = min(b[1] for b in bx)
+        label_x = bx[-1][2] + 8
+        label_y = y0 - 5
 
-        ok = d["ok"]
-        label_x = cols[-1][1] + 8
-        label_y = y0 - 2
-        if ok:
+        if key_only:
+            b = bx[LETTERS.index(d["key"])]
+            draw.rectangle(expand_box(*b, pad=3), outline=(220, 30, 30), width=3)
+            continue
+        # Student's pick
+        if status in ("correct", "wrong") and d["student"] in LETTERS:
+            b = bx[LETTERS.index(d["student"])]
+            col = (0, 160, 60) if status == "correct" else (30, 90, 220)
+            draw.rectangle(expand_box(*b, pad=6), outline=col, width=2)
+        # Correct key
+        b = bx[LETTERS.index(d["key"])]
+        draw.rectangle(expand_box(*b, pad=3), outline=(220, 30, 30), width=3)
+
+        if status == "ambiguous":
+            for letter in d.get("marked") or []:
+                mb = bx[LETTERS.index(letter)]
+                draw.rectangle(expand_box(*mb, pad=6), outline=(230, 140, 20), width=3)
+            draw.text((label_x, label_y), "AMB", fill=(230, 140, 20), font=font_ok)
+        elif status == "correct":
             draw.text((label_x, label_y), "OK", fill=(0, 150, 40), font=font_ok)
+        elif status == "blank":
+            draw.text((label_x, label_y), "—", fill=(120, 120, 120), font=font_ok)
         else:
             draw.text((label_x, label_y), "X", fill=(200, 20, 20), font=font_ok)
+        if d.get("note"):
+            txt = {"ambiguous": "AMB", "correct": "OK", "blank": "—"}.get(status, "X")
+            qx = label_x + draw.textlength(txt, font=font_ok) + 1
+            draw.text((qx, label_y), "?", fill=(230, 140, 20), font=font_ok)
 
-    banner_w, banner_h = 260, 88
-    bx0, by0 = w - banner_w - 18, 12
-    bx1, by1 = bx0 + banner_w, by0 + banner_h
-    draw.rectangle([bx0, by0, bx1, by1], fill=(40, 40, 40))
-    score_txt = f"{score_info['score']} / {score_info['total']}"
-    draw.text((bx0 + 16, by0 + 8), score_txt, fill=(255, 220, 40), font=font_banner)
-    sub = f"Wrong {score_info['wrong']} | Blank {score_info['blank']}"
-    draw.text((bx0 + 16, by0 + 52), sub, fill=(220, 220, 220), font=font_small)
-    draw.text((bx0 + 16, by0 + 68), "Red box = correct ans", fill=(200, 200, 200), font=font_small)
+    if layout is not None and layout.method != "landmarks":
+        draw.rectangle([10, h - 50, w - 10, h - 10], fill=(255, 235, 200))
+        draw.text((20, h - 44), "WARNING: landmarks not found — fixed coordinates used, check by eye",
+                  fill=(180, 60, 0), font=font_small)
+
+    amb = int(score_info.get("ambiguous") or 0)
+    banner_w, banner_h = (300, 50) if key_only else (300, 92)
+    # Blank left margin beside the answer frame (keeps the header readable).
+    frame_left = min(b[0] for rd in reads.values() for b in (rd.boxes or [(w, 0, w, 0)]))
+    if frame_left > banner_w + 60:
+        bx0, by0 = 16, int(min(b[1] for rd in reads.values() for b in rd.boxes) - 40)
+    else:
+        bx0, by0 = w - banner_w - 18, 12
+    draw.rectangle([bx0, by0, bx0 + banner_w, by0 + banner_h], fill=(40, 40, 40))
+    draw.text((bx0 + 16, by0 + 4), f"{score_info['score']} / {score_info['total']}", fill=(255, 220, 40), font=font_banner)
+    if key_only:
+        return im
+    draw.text((bx0 + 16, by0 + 46), f"Wrong {score_info['wrong']} | Blank {score_info['blank']} | Amb {amb}",
+              fill=(220, 220, 220), font=font_small)
+    draw.text((bx0 + 16, by0 + 60), "Red=key  green=right  blue=wrong", fill=(200, 200, 200), font=font_small)
+    draw.text((bx0 + 16, by0 + 74), "? = check (erasure/faint)", fill=(200, 200, 200), font=font_small)
     return im

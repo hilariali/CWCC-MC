@@ -16,6 +16,7 @@ from pypdf import PdfWriter
 from .analyze import write_analysis
 from .annotate import annotate_page
 from .geometry import DPI, load_geometry
+from .layout import locate_bubbles
 from .reader import read_answers, score_page
 from .scheme import parse_marking_scheme
 
@@ -116,13 +117,19 @@ def mark_pdf(
                 im = im0.convert("RGB")
                 # Force load before file closes
                 im.load()
-            reads = read_answers(im, geo, questions=questions)
+            layout = locate_bubbles(im, geo, questions)
+            reads = read_answers(im, geo, questions=questions, layout=layout)
             scored = score_page(reads, key)
             scored["page"] = idx
             scored["error"] = None
+            scored["alignment"] = {"method": layout.method, **layout.info}
+            scored["warnings"] = list(layout.warnings)
+            scored["checks"] = [
+                {"q": d["q"], "note": d["note"]} for d in scored["detail"] if d.get("note")
+            ]
             page_records.append(scored)
 
-            annotated = annotate_page(im, reads, scored, geo)
+            annotated = annotate_page(im, reads, scored, geo, layout=layout)
             preview_path = preview_dir / f"page-{idx:02d}-marked.png"
             annotated.save(preview_path, "PNG", optimize=True)
             result.preview_paths.append(preview_path)
@@ -131,7 +138,7 @@ def mark_pdf(
             _save_pdf(annotated, pdf_out)
             result.pdf_paths.append(pdf_out)
             # free memory
-            del annotated, reads, im
+            del annotated, reads, im, layout
         except Exception as e:
             err = {"page": idx, "error": str(e)}
             result.page_errors.append(err)
@@ -142,6 +149,7 @@ def mark_pdf(
                     "total": len(questions),
                     "wrong": 0,
                     "blank": len(questions),
+                    "ambiguous": 0,
                     "detail": [
                         {
                             "q": q,
@@ -149,6 +157,7 @@ def mark_pdf(
                             "key": key[q],
                             "status": "error",
                             "ok": False,
+                            "marked": [],
                         }
                         for q in questions
                     ],

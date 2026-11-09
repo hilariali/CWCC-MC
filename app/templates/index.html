@@ -90,16 +90,16 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>MC Exam Marking <span class="badge">v1.1 · no LLM</span></h1>
+    <h1>MC Exam Marking <span class="badge">v2.0 · landmark alignment · no LLM</span></h1>
     <p class="sub">Upload any number of CWCCC-style pages in one PDF + marking scheme → annotated PDFs + analysis. Score total = scheme length. Works page-by-page (one bad page won’t kill the whole job).</p>
 
     <form id="mark-form" class="card" enctype="multipart/form-data">
       <label for="pdf">Student answer sheet PDF</label>
-      <p class="hint">Multi-page scan; one student sheet per page. Calibrated for CWCCC OMR at ~150 dpi.</p>
+      <p class="hint">Multi-page scan; one student sheet per page. For the CWCCC OMR sheet. Each page is aligned to the printed pink answer frame (rotation, skew, shift, scale, upside-down scans).</p>
       <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
 
       <label for="scheme" style="margin-top:18px">Marking scheme (any length)</label>
-      <p class="hint">Paste only the questions you set. Length follows your input (Q1…N, up to 50 on this sheet layout). JSON <code>{"1":"A",...}</code>, lines <code>1:A</code>, or <code>1A 2C …</code>. Sample 40-Q key is prefilled — edit/delete as needed.</p>
+      <p class="hint">Paste only the questions you set. Length follows your input (Q1…N, up to 100 on this sheet layout). JSON <code>{"1":"A",...}</code>, lines <code>1:A</code>, or <code>1A 2C …</code>. Sample 40-Q key is prefilled — edit/delete as needed.</p>
       <textarea id="scheme" name="scheme">{{ default_scheme }}</textarea>
 
       <div class="row">
@@ -120,7 +120,7 @@
       </div>
       <table>
         <thead>
-          <tr><th>Page</th><th>Score</th><th>Wrong</th><th>Blank</th></tr>
+          <tr><th>Page</th><th>Score</th><th>Wrong</th><th>Blank</th><th>Ambiguous</th><th>Alignment / checks</th></tr>
         </thead>
         <tbody id="score-body"></tbody>
       </table>
@@ -167,7 +167,10 @@
         const note = s.error ? ` <span style="color:#fca5a5">(${s.error})</span>` : '';
         tr.innerHTML = `<td>P${String(s.page).padStart(2,'0')}</td>
           <td><strong>${s.score} / ${s.total}</strong>${note}</td>
-          <td>${s.wrong}</td><td>${s.blank}</td>`;
+          <td>${s.wrong}</td><td>${s.blank}</td><td>${s.ambiguous ?? 0}</td>
+          <td style="font-size:.85em">${s.alignment === 'landmarks' ? 'landmarks ✓' : '<span style="color:#f59e0b">' + (s.alignment || '-') + '</span>'}
+          ${(s.warnings || []).map(w => '<div style="color:#f59e0b">⚠ ' + w + '</div>').join('')}
+          ${(s.checks || []).map(c => '<div>Q' + c.q + ': ' + c.note + '</div>').join('')}</td>`;
         scoreBody.appendChild(tr);
       }
       previews.innerHTML = '';

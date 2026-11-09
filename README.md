@@ -1,14 +1,15 @@
-# MC Exam Marking (v1)
+# MC Exam Marking (v2.0)
 
-Python-only web app that marks **CWCCC-style** multiple-choice answer sheets (A–D bubbles). Question count follows the marking scheme you paste (contiguous Q1…N, up to **50** on the calibrated sheet layout). No LLM.
+Python-only web app that marks **CWCCC-style** multiple-choice answer sheets (A–D bubbles). Question count follows the marking scheme you paste (Q1…N, up to **100** — 4 columns of 25). No LLM.
 
-Upload a scanned PDF + marking scheme → get annotated PDFs (red box on correct answer, OK/X, score banner) and machine-readable analysis CSVs/JSON in a zip.
+Upload a scanned PDF + marking scheme → get annotated PDFs (red box on correct answer, OK/X/AMB, score banner) and machine-readable analysis CSVs/JSON in a zip.
 
 ## Requirements
 
 - Python 3.10+
 - [poppler-utils](https://poppler.freedesktop.org/) (`pdftoppm`) for PDF → PNG
-- Calibrated for CWCCC OMR sheets rendered at **~150 dpi** (page size ~1275×1650)
+- CWCCC OMR sheet, rendered at **150 dpi** (pages are aligned via printed landmarks)
+- numpy
 
 ```bash
 # Debian/Ubuntu
@@ -88,6 +89,45 @@ A sample classroom key (40 Q) is prefilled in the UI — shorten or extend it; s
 | GET | `/api/jobs/{id}` | Job status / scores |
 | GET | `/api/jobs/{id}/download` | Zip of annotated PDFs + analysis |
 | GET | `/health` | Health check |
+
+
+## How bubbles are located (v2.0 — landmark alignment)
+
+v1.x used fixed pixel coordinates tuned on one scan, so a few pixels of shift, skew or a
+different scanner made boxes land on the printed letters instead of the bubbles.
+v2.0 locates every page from the sheet's own printed landmarks:
+
+1. **Orientation** — landscape renders are turned portrait; if the answer frame is found in
+   the top half the page is treated as upside down and rotated 180°.
+2. **Skew** — the pink sheet print (frame lines, bubble outlines) is isolated by colour and the
+   rotation that makes those lines most axis-aligned is found (±5°, 0.05° steps).
+3. **Frame landmarks** — the answer-area frame (outer box + 3 column dividers) is located; each
+   of its 4 edges is then re-measured in ~30 strips on the original image and fitted as a
+   straight line, and the 4 corners are their intersections.
+4. **Homography** — a perspective transform maps the reference sheet's frame corners
+   (`REF_FRAME` in `engine/geometry.json`) to this page's corners. All 400 reference bubble
+   boxes (`BUBBLES`) are pushed through it, so shift / scale / rotation / mild keystone are absorbed.
+5. **Local snap** — each question row is nudged (≤4 px) to centre on the printed bubble
+   outlines, smoothed per 5-row block so a fully-shaded row still follows its neighbours.
+6. If landmarks can't be found the page falls back to fixed coordinates and is flagged
+   (`Alignment = fallback-fixed`, orange warning strip on the page) — check those by eye.
+
+`BUBBLES` were recalibrated from 29 real scans (2 print batches) as the median snapped position.
+
+## Reading marks
+
+Ink = pixels darker than 200/255 that are **not** the pink sheet print, as a fraction of the box.
+Blank bubbles read ~0–0.06; pencil fills 0.10–0.75.
+
+- nothing ≥ `MARK_MIN_DARK` (0.09) → **blank**
+- a second bubble ≥ 0.09 and ≥ 60 % of the strongest → **ambiguous** (no credit, orange **AMB**)
+- otherwise the strongest bubble is the answer. A weaker residual mark (≥0.05, e.g. an
+  erasure) or a light fill (<0.15) is still scored but listed in **Checks** and marked `?` on the page.
+
+Cross-outs are not recognised as shapes: a slashed-out filled bubble next to a real answer reads as ambiguous.
+
+`python3 scripts/smoke_test.py` checks the classroom sample, double-mark/blank cases, and
+rotation ±1.5–2.5°, shift, 0.96 scale and upside-down robustness.
 
 ## Layout
 

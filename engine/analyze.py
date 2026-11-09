@@ -18,13 +18,21 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
     summary_path = out_dir / "marks_summary.csv"
     with open(summary_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["Page", "Score", "Total", "Wrong", "Blank", "Wrong/blank"])
+        w.writerow(["Page", "Score", "Total", "Wrong", "Blank", "Ambiguous", "Wrong/blank/amb",
+                    "Alignment", "Skew_deg", "Checks", "Warnings"])
         for p in pages:
-            wrongs = []
+            notes = []
             for d in p["detail"]:
                 if not d["ok"]:
-                    stu = d["student"] or "blank"
-                    wrongs.append(f"Q{d['q']}:{stu}->{d['key']}")
+                    if d.get("status") == "ambiguous":
+                        marked = d.get("marked") or (
+                            d["student"].split("/") if d.get("student") else []
+                        )
+                        mark_s = "/".join(marked) if marked else "amb"
+                        notes.append(f"Q{d['q']}:amb({mark_s})->{d['key']}")
+                    else:
+                        stu = d["student"] or "blank"
+                        notes.append(f"Q{d['q']}:{stu}->{d['key']}")
             w.writerow(
                 [
                     p["page"],
@@ -32,7 +40,12 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                     p["total"],
                     p["wrong"],
                     p["blank"],
-                    "; ".join(wrongs),
+                    p.get("ambiguous", 0),
+                    "; ".join(notes),
+                    (p.get("alignment") or {}).get("method", ""),
+                    (p.get("alignment") or {}).get("skew_deg", ""),
+                    "; ".join(f"Q{c['q']}: {c['note']}" for c in p.get("checks") or []),
+                    "; ".join(p.get("warnings") or []),
                 ]
             )
     paths["marks_summary"] = summary_path
@@ -87,16 +100,25 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                 "correct_count",
                 "wrong_count",
                 "blank_count",
+                "ambiguous_count",
                 "correct_pct",
                 "wrong_pct",
                 "blank_pct",
+                "ambiguous_pct",
             ]
         )
         ww.writerow(
-            ["question", "key", "pages_correct", "pages_wrong", "pages_blank"]
+            [
+                "question",
+                "key",
+                "pages_correct",
+                "pages_wrong",
+                "pages_blank",
+                "pages_ambiguous",
+            ]
         )
         for qi, q in enumerate(questions):
-            right, wrong, blank = [], [], []
+            right, wrong, blank, amb = [], [], [], []
             key_ans = pages[0]["detail"][qi]["key"] if pages else ""
             for p in pages:
                 d = p["detail"][qi]
@@ -105,18 +127,22 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                     right.append(label)
                 elif d["status"] == "blank":
                     blank.append(label)
+                elif d["status"] == "ambiguous":
+                    amb.append(label)
                 else:
                     wrong.append(label)
-            cc, wc, bc = len(right), len(wrong), len(blank)
+            cc, wc, bc, ac = len(right), len(wrong), len(blank), len(amb)
             row_stat = {
                 "question": q,
                 "key": key_ans,
                 "correct_count": cc,
                 "wrong_count": wc,
                 "blank_count": bc,
+                "ambiguous_count": ac,
                 "correct_pct": round(100.0 * cc / n_pages, 1),
                 "wrong_pct": round(100.0 * wc / n_pages, 1),
                 "blank_pct": round(100.0 * bc / n_pages, 1),
+                "ambiguous_pct": round(100.0 * ac / n_pages, 1),
             }
             q_stats.append(row_stat)
             ws.writerow(
@@ -126,20 +152,31 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                     cc,
                     wc,
                     bc,
+                    ac,
                     row_stat["correct_pct"],
                     row_stat["wrong_pct"],
                     row_stat["blank_pct"],
+                    row_stat["ambiguous_pct"],
                 ]
             )
             ww.writerow(
-                [q, key_ans, " ".join(right), " ".join(wrong), " ".join(blank)]
+                [
+                    q,
+                    key_ans,
+                    " ".join(right),
+                    " ".join(wrong),
+                    " ".join(blank),
+                    " ".join(amb),
+                ]
             )
     paths["question_stats"] = stats_path
     paths["question_who_right_wrong"] = who_path
 
+    total_ambiguous = sum(int(p.get("ambiguous") or 0) for p in pages)
     summary = {
         "num_pages": len(pages),
         "total_questions": total_q,
+        "total_ambiguous": total_ambiguous,
         "scores": [
             {
                 "page": p["page"],
@@ -147,6 +184,7 @@ def write_analysis(pages: list[dict[str, Any]], out_dir: Path) -> dict[str, Path
                 "total": p["total"],
                 "wrong": p["wrong"],
                 "blank": p["blank"],
+                "ambiguous": p.get("ambiguous", 0),
             }
             for p in pages
         ],
