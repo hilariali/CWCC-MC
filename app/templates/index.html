@@ -188,8 +188,8 @@
     async function pollJob(jobId) {
       const started = Date.now();
       while (true) {
-        if (Date.now() - started > 15 * 60 * 1000) {
-          throw new Error('Timed out waiting for marking (15 min). Try fewer pages or retry.');
+        if (Date.now() - started > 45 * 60 * 1000) {
+          throw new Error('Timed out waiting for marking (45 min). Try fewer pages or retry.');
         }
         const res = await fetch('/api/jobs/' + jobId);
         const data = await res.json().catch(() => ({}));
