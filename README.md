@@ -1,6 +1,9 @@
-# MC Exam Marking (v2.0)
+# MC Exam Marking (v2.1)
 
 Python-only web app that marks **CWCCC-style** multiple-choice answer sheets (A–D bubbles). Question count follows the marking scheme you paste (Q1…N, up to **100** — 4 columns of 25). No LLM.
+
+
+**v2.1.0:** PDF pages are rasterized one-at-a-time (lower peak RAM on free hosts like Render 512MB). If a job vanishes mid-run the UI tells you the host likely restarted — retry or split the PDF.
 
 Upload a scanned PDF + marking scheme → get annotated PDFs (red box on correct answer, OK/X/AMB, score banner) and machine-readable analysis CSVs/JSON in a zip.
 

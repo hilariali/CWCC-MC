@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 import subprocess
@@ -33,28 +34,109 @@ class MarkingResult:
     page_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
-def pdf_to_pngs(pdf_path: Path, out_dir: Path, dpi: int = DPI) -> list[Path]:
+def _pdf_page_count(pdf_path: Path) -> int | None:
+    """Return page count via pdfinfo, or None if unavailable."""
+    try:
+        proc = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    for line in proc.stdout.splitlines():
+        if line.lower().startswith("pages:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def pdf_to_pngs(
+    pdf_path: Path,
+    out_dir: Path,
+    dpi: int = DPI,
+    *,
+    progress: Callable[[str, dict[str, Any]], None] | None = None,
+    page_timeout: int = 120,
+) -> list[Path]:
+    """Rasterize a PDF one page at a time to keep peak RAM low (Render free ~512MB)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = out_dir / "page"
     for old in out_dir.glob("page-*.png"):
         old.unlink()
-    cmd = [
-        "pdftoppm",
-        "-png",
-        "-r",
-        str(dpi),
-        str(pdf_path),
-        str(prefix),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            "pdftoppm (poppler-utils) is required. Install poppler-utils."
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"pdftoppm failed: {e.stderr or e.stdout}") from e
-    pages = sorted(out_dir.glob("page-*.png"))
+
+    total = _pdf_page_count(pdf_path)
+    pages: list[Path] = []
+    page_num = 1
+
+    def report(stage: str, **extra: Any) -> None:
+        if progress:
+            progress(stage, extra)
+
+    while True:
+        if total is not None and page_num > total:
+            break
+        # pdftoppm names: prefix-1.png, prefix-2.png, ... (no zero-pad by default)
+        # Use a per-page prefix so we control the final filename.
+        tmp_prefix = out_dir / f"_tmp_page{page_num}"
+        cmd = [
+            "pdftoppm",
+            "-png",
+            "-r",
+            str(dpi),
+            "-f",
+            str(page_num),
+            "-l",
+            str(page_num),
+            "-singlefile",
+            str(pdf_path),
+            str(tmp_prefix),
+        ]
+        report(
+            "rasterizing",
+            page=page_num,
+            total_pages=total if total is not None else page_num,
+            dpi=dpi,
+        )
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=page_timeout,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "pdftoppm (poppler-utils) is required. Install poppler-utils."
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"pdftoppm timed out after {page_timeout}s on page {page_num}"
+            ) from e
+        except subprocess.CalledProcessError as e:
+            if total is None and page_num > 1:
+                # Past the last page when we did not know the count up front.
+                break
+            raise RuntimeError(
+                f"pdftoppm failed on page {page_num}: {e.stderr or e.stdout}"
+            ) from e
+
+        produced = out_dir / f"_tmp_page{page_num}.png"
+        if not produced.is_file():
+            if total is None and page_num > 1:
+                break
+            raise RuntimeError(
+                f"pdftoppm produced no image for page {page_num} — is the PDF valid/scanned?"
+            )
+        final = out_dir / f"page-{page_num:02d}.png"
+        produced.replace(final)
+        pages.append(final)
+        page_num += 1
+
     if not pages:
         raise RuntimeError("pdftoppm produced no page images — is the PDF valid/scanned?")
     return pages
@@ -104,7 +186,9 @@ def mark_pdf(
 
     use_dpi = dpi or DPI
     report("rasterizing", dpi=use_dpi)
-    page_pngs = pdf_to_pngs(pdf_copy, pages_dir, dpi=use_dpi)
+    page_pngs = pdf_to_pngs(
+        pdf_copy, pages_dir, dpi=use_dpi, progress=progress
+    )
     report("rasterized", num_pages=len(page_pngs))
 
     result = MarkingResult(job_dir=job_dir)
@@ -137,8 +221,9 @@ def mark_pdf(
             pdf_out = annotated_dir / f"P{idx:02d}_page{idx:02d}_marked.pdf"
             _save_pdf(annotated, pdf_out)
             result.pdf_paths.append(pdf_out)
-            # free memory
-            del annotated, reads, im, layout
+            # free memory — keep peak RAM low on Render free (512MB)
+            del annotated, reads, im, layout, scored
+            gc.collect()
         except Exception as e:
             err = {"page": idx, "error": str(e)}
             result.page_errors.append(err)
@@ -164,6 +249,7 @@ def mark_pdf(
                     "error": str(e),
                 }
             )
+            gc.collect()
 
     if not result.pdf_paths:
         raise RuntimeError(

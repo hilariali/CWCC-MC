@@ -193,6 +193,11 @@
         }
         const res = await fetch('/api/jobs/' + jobId);
         const data = await res.json().catch(() => ({}));
+        if (res.status === 404) {
+          throw new Error(
+            'Job disappeared (host likely restarted mid-job — common on free hosts with large PDFs). Please retry; if it keeps failing, split the PDF into fewer pages.'
+          );
+        }
         if (!res.ok) {
           throw new Error(formatDetail(data.detail) || res.statusText || 'Status check failed');
         }
